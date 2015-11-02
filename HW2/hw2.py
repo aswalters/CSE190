@@ -10,6 +10,7 @@ from array import array as pyarray
 from numpy import append, array, int8, uint8, zeros
 from itertools import chain
 import profile
+from matplotlib import pyplot as plt
 
 
 def load_mnist(dataset="training", digits=numpy.arange(10), path="."):
@@ -48,12 +49,9 @@ def load_mnist(dataset="training", digits=numpy.arange(10), path="."):
 
     return images, labels
 
-
 def normalize_data(data):
-    data = [numpy.concatenate(x) for x in data]
-    data = numpy.array([zscore(x) for x in data])
+    data = numpy.array([zscore(numpy.concatenate(x)) for x in data])
     return data
-
 
 def get_data(t):
     if (t == 'test'):
@@ -67,7 +65,6 @@ def get_data(t):
         targets = numpy.array([[int(t[0] == i) for i in range(10)] for t in targets])
         return images, targets
     raise Exception('You brokeded it...')
-
 
 def fake_data():
     max_index = lambda x : max([(i,e) for i,e in enumerate(x)],key=lambda y : y[1])[0]
@@ -85,12 +82,19 @@ psig = lambda val : numpy.exp(val)/(numpy.exp(val)+1)**2
 relu = lambda val : max(0,val)
 prelu = lambda val : 0 if(val < 0) else 1
 
+cross_error = lambda teacher,prediction : -1/len(t)*sum(
+                t*numpy.log(p)+(1-t)*numpy.log(1-p) for t,p in zip(teacher,prediction))
+
 def HLN_tester():
     max_index = lambda x : max([(i,e) for i,e in enumerate(x)],key=lambda y : y[1])[0]
-    #images, targets = get_data('train')
-    images, targets = fake_data()
-    machine = HLN(images, targets,patience=50000,rate=10**-2,batch=10,hidden=[4],functions=(sigmoid,psig))
-    #images,targets = get_data('test')
+    images, targets = get_data('train')
+    #images, targets = fake_data()
+    pca = PCA(n_components=20)
+    pca.fit(images)
+    images = pca.transform(images)
+    machine = HLN(images, targets,patience=10000,rate=10**-1,batch=50,hidden=[50],functions=(hypertan,ptan))
+    images,targets = get_data('test')
+    images = pca.transform(images)
     count = 0
     for d,t in zip(images,targets):
         p = machine.predict(d)
@@ -99,12 +103,57 @@ def HLN_tester():
             count+=1
     print('Accuracy : '+str(count/len(images)))
 
+def hln_grapher():
+    max_index = lambda x : max([(i,e) for i,e in enumerate(x)],key=lambda y : y[1])[0]
+    images,targets = get_data('train')
+    #pca = PCA(n_components=20)
+    #pca.fit(images) 
+    #images = pca.transform(images)
+    test_images,test_targets = get_data('test')
+    #test_images = pca.transform(test_images)
+    test_errors = []
+    training_errors = []
+    number_iters = []
+    print('Starting Training')
+    for x in [2**k for k in range(15)]:
+        machine = HLN(images, targets,patience=x,rate=10**-1,batch=50,hidden=[50],functions=(hypertan,ptan))
+        test_count = 0
+        for d,t in zip(test_images,test_targets):
+            p = machine.predict(d)
+            if(t[max_index(p)]==1):
+                test_count+=1
+        training_count = 0
+        for d,t in zip(images,targets):
+            p = machine.predict(d)
+            if(t[max_index(p)]==1):
+                training_count+=1
+        test_errors.append(test_count/len(test_images))
+        training_errors.append(training_count/len(images))
+        number_iters.append(x)
+        print(x)
+        print(test_count/len(test_images))
+        print(training_count/len(images))
+    file_str = '_htan'
+    title_str = ' with htan'
+    ax = plt.gca()
+    plt.scatter(number_iters,test_errors)
+    ax.set_xscale('log')
+    plt.title('testing : grad_descent iters vs test_accuracy'+title_str)
+    plt.savefig('test_iters_accuracy'+file_str+'.png')
+    plt.clf()
+    ax = plt.gca()
+    plt.scatter(number_iters,training_errors)
+    ax.set_xscale('log')
+    plt.title('training : grad_descent iters vs test_accuracy'+title_str)
+    plt.savefig('train_iters_accuracy'+file_str+'.png')
+    plt.clf()
+
 def softmax(vect):
     vect = numpy.exp(vect)
     return vect / sum(vect)
 
 class HLN:
-    def __init__(self, data, targets, rate=10**-4, drop=0.5, patience=100000, batch=100, hidden=[100],functions=(relu,prelu)):
+    def __init__(self, data, targets, rate=10**-2, drop=0.5, patience=100000, batch=100, hidden=[100],functions=(relu,prelu),weight_decay=0,momentum=0):
         norm = lambda scale: numpy.random.normal(scale=scale)
         scale_func = lambda x : 1/numpy.sqrt(x+1)
         layers = [len(data[0])]+list(hidden)+[len(targets[0])]
@@ -121,7 +170,13 @@ class HLN:
         data = numpy.array([[d, t] for d, t in zip(data, targets)])
         numpy.random.shuffle(data)
         count=0
+        previous_update_weights = [z.copy()*0 for z in self.weights]
+        previous_update_bias = [numpy.matrix([0 for x in y]).transpose() for y in self.bias]
         for _ in range(patience):
+            previous_update_weights = [momentum*w_old  for w_old in previous_update_weights]
+            previous_update_bias = [momentum*b_old for b_old in previous_update_bias]
+            self.weights = [w_old+w_less_old for w_old,w_less_old in zip(self.weights,previous_update_weights)]
+            self.bias = [b_old +b_less_old for b_old,b_less_old in zip(self.bias,previous_update_bias)]
             if (count + batch > len(data)):
                 numpy.random.shuffle(data)
                 count = 0
@@ -134,9 +189,13 @@ class HLN:
                 weight_update = [w_old + w_new for w_old, w_new in zip(weight_update, wu)]
                 bias_update = [b_old + b_new for b_old, b_new in zip(bias_update, bu)]    
             count += batch
+            previous_update_weights = [w_old+w_new for w_old,w_new in zip(previous_update_weights,weight_update)]
+            previous_update_bias = [b_old+b_new for b_old,b_new in zip(previous_update_bias,bias_update)]
             self.weights = [w_old + w_new for w_old, w_new in zip(self.weights, weight_update)]
+            self.weights = [w*(1- weight_decay) for w in self.weights]
             self.transpose_weights = [x.transpose() for x in self.weights]
             self.bias = [b_old + b_new for b_old, b_new in zip(self.bias, bias_update)]
+            self.bias = [b*(1- weight_decay ) for b in self.bias]
 
     def predict(self, datum, activation=None):
         self.outputs = []
@@ -176,6 +235,7 @@ class HLN:
 if (__name__ == '__main__'):
     print('Start Time : '+time.asctime())
     start = time.time()
-    HLN_tester()
+    #HLN_tester()
+    hln_grapher()
     stop = time.time()
     print('Execution Time : ' + str(stop - start))
